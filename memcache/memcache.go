@@ -170,6 +170,16 @@ type Item struct {
 	casid uint64
 }
 
+// Stat is a general-purpose statistic or setting of the memcahed server
+type Stat struct {
+	// Name is the Stat's key (250 bytes maximum).
+	Name string
+
+	// Value is the Stat's value. They can be of varying types, but can be coerced to a string.
+	// See: https://github.com/memcached/memcached/blob/master/doc/protocol.txt#L654
+	Value string
+}
+
 // conn is a connection to a server.
 type conn struct {
 	nc   net.Conn
@@ -323,6 +333,28 @@ func (c *Client) Get(key string) (item *Item, err error) {
 	return
 }
 
+// GetStats supports the MemCahce protocol's STATS command. ErrCacheMiss is returned for a
+// memcache cache miss.
+func (c *Client) GetStats() (stats map[string]map[string]interface{}, err error) {
+	err = c.selector.Each(func(addr net.Addr) error {
+		return c.getStatsFromAddr(addr, func(hostName string, statName string, statValue interface{}) {
+			hostStats, ok = stats[hostName]
+			if !ok {
+				stats[hostName] = map[string]interface{}{
+					statName: statValue,
+				}
+			}
+			hostStats[statName] = statValue
+			stats[hostName] = hostStats
+		})
+	})
+
+	if err == nil {
+		err = ErrCacheMiss
+	}
+	return
+}
+
 // Touch updates the expiry for the given key. The seconds parameter is either
 // a Unix timestamp or, if seconds is less than 1 month, the number of seconds
 // into the future at which time the item will expire. Zero means the item has
@@ -369,6 +401,21 @@ func (c *Client) getFromAddr(addr net.Addr, keys []string, cb func(*Item)) error
 			return err
 		}
 		if err := parseGetResponse(rw.Reader, cb); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
+func (c *Client) getStatsFromAddr(addr net.Addr, cb func(hostName string, statName string, statValue interface{})) error {
+	return c.withAddrRw(addr, func(rw *bufio.ReadWriter) error {
+		if _, err := fmt.Fprint(rw, "stats\r\n"); err != nil {
+			return err
+		}
+		if err := rw.Flush(); err != nil {
+			return err
+		}
+		if err := parseStatsResponse(addr.String(), rw.Reader, cb); err != nil {
 			return err
 		}
 		return nil
@@ -496,6 +543,26 @@ func parseGetResponse(r *bufio.Reader, cb func(*Item)) error {
 	}
 }
 
+func parseStatsResponse(netString string, r *bufio.Reader, cb func(hostName string, statName string, statValue interface{})) error {
+	stats := []Stat{}
+	for {
+		line, err := r.ReadSlice('\n')
+		if err != nil {
+			return err
+		}
+		if bytes.Equal(line, resultEnd) {
+			return nil
+		}
+		stat := new(Stat)
+		err = scanStatResponseLine(line, stat)
+		if err != nil {
+			return err
+		}
+		stats = append(stats, stat)
+	}
+	cb(netString, stat.Name, stat.Value)
+}
+
 // scanGetResponseLine populates it and returns the declared size of the item.
 // It does not read the bytes of the item.
 func scanGetResponseLine(line []byte, it *Item) (size int, err error) {
@@ -510,6 +577,19 @@ func scanGetResponseLine(line []byte, it *Item) (size int, err error) {
 		return -1, fmt.Errorf("memcache: unexpected line in get response: %q", line)
 	}
 	return size, nil
+}
+
+func scanStatResponseLine(line []byte, stat *Stat) (err error) {
+	pattern := "STAT %s %s\r\n"
+
+	dest := []interface{}{stat.Name, stat.Value}
+
+	n, err := fmt.Sscanf(string(line), pattern, dest...)
+	if err != nil || n != len(dest) {
+		return -1, fmt.Errorf("memcache: unexpected line in get response: %q", line)
+	}
+
+	return *stat, nil
 }
 
 // Set writes the given item, unconditionally.
