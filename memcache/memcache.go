@@ -338,7 +338,7 @@ func (c *Client) Get(key string) (item *Item, err error) {
 func (c *Client) GetStats() (stats map[string]map[string]interface{}, err error) {
 	err = c.selector.Each(func(addr net.Addr) error {
 		return c.getStatsFromAddr(addr, func(hostName string, statName string, statValue interface{}) {
-			hostStats, ok = stats[hostName]
+			hostStats, ok := stats[hostName]
 			if !ok {
 				stats[hostName] = map[string]interface{}{
 					statName: statValue,
@@ -544,7 +544,7 @@ func parseGetResponse(r *bufio.Reader, cb func(*Item)) error {
 }
 
 func parseStatsResponse(netString string, r *bufio.Reader, cb func(hostName string, statName string, statValue interface{})) error {
-	stats := []Stat{}
+	stats := []*Stat{}
 	for {
 		line, err := r.ReadSlice('\n')
 		if err != nil {
@@ -559,8 +559,9 @@ func parseStatsResponse(netString string, r *bufio.Reader, cb func(hostName stri
 			return err
 		}
 		stats = append(stats, stat)
+		cb(netString, stat.Name, stat.Value)
 	}
-	cb(netString, stat.Name, stat.Value)
+	return nil
 }
 
 // scanGetResponseLine populates it and returns the declared size of the item.
@@ -585,11 +586,11 @@ func scanStatResponseLine(line []byte, stat *Stat) (err error) {
 	dest := []interface{}{stat.Name, stat.Value}
 
 	n, err := fmt.Sscanf(string(line), pattern, dest...)
-	if err != nil || n != len(dest) {
-		return -1, fmt.Errorf("memcache: unexpected line in get response: %q", line)
+	if err != nil {
+		return fmt.Errorf("memcache: unexpected line in stat response: %q", line)
 	}
 
-	return *stat, nil
+	return nil
 }
 
 // Set writes the given item, unconditionally.
